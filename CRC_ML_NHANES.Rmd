@@ -150,7 +150,7 @@ univariate_analysis <- function(data) {
   
   return(results)
 }
-univariate_analysis(selected_data)
+univariate_analysis(balanced_data)
 ```
 
 # rose method
