@@ -153,18 +153,4 @@ univariate_analysis <- function(data) {
 univariate_analysis(balanced_data)
 ```
 
-# rose method
-```{r}
-library(ROSE)
-selected_data$outcome <- as.factor(selected_data$outcome)
-library(dplyr)
-selected_data <- selected_data %>%
-  mutate(across(where(is.character), as.factor))
-selected_data <- selected_data %>%
-  mutate(across(where(is.logical), as.numeric))
-selected_data$outcome <- as.factor(selected_data$outcome)
-balanced_data <- ROSE(outcome ~ ., data = selected_data, seed = 123)$data
-table(balanced_data$outcome)
-prop.table(table(balanced_data$outcome)) * 100
-```
 
