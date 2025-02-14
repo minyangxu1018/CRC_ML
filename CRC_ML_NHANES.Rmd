@@ -1,0 +1,167 @@
+---
+title: "CRC_ML_NHANES"
+author: "Minyang Xu"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+Import packages
+```{r}
+library(haven)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(reshape2)
+library(corrplot)
+```
+
+
+
+Import data
+```{r}
+setwd("G:/My Drive/2024 Fall/GU2686/Repository/Dataset")
+# "G:/My Drive/2024 Fall/GU2686/Repository/Dataset"
+# "/Users/minyangmaxims_xu/Library/CloudStorage/GoogleDrive-mx2269@nyu.edu/My Drive/2024 Fall/GU2686/Repository/Dataset"
+demorgraphic <- read_xpt("Demorgraphic.XPT")
+totalcholoesterol <- read_xpt("Cholesterol - Total (P_TCHOL).XPT")
+chromiunurine <- read_xpt("Chromium Urine.XPT")
+completebloodcount <- read_xpt("Complete Blood Count with 5-Part Differential in Whole Blood (P_CBC).XPT")
+standardbiochemistry <- read_xpt("Standard Biochemistry Profile (P_BIOPRO).XPT")
+alcoholuse <- read_xpt("Alcohol Use (P_ALQ).XPT")
+diabetes <- read_xpt("Diabetes (P_DIQ).XPT")
+healthinsurance <- read_xpt("Health Insurance (P_HIQ).XPT")
+medicalcondition <- read_xpt("Medical Conditions (P_MCQ).XPT")
+smoking <- read_xpt("Smoking - Cigarette Use (P_SMQ).XPT")
+bodymeasure <- read_xpt("Body Measure (P_BMX).XPT")
+```
+
+Combining data
+```{r}
+datasets <- list(
+  demorgraphic = demorgraphic,
+  totalcholoesterol = totalcholoesterol,
+  chromiunurine = chromiunurine,
+  completebloodcount = completebloodcount,
+  standardbiochemistry = standardbiochemistry,
+  alcoholuse = alcoholuse,
+  diabetes = diabetes,
+  healthinsurance = healthinsurance,
+  medicalcondition = medicalcondition,
+  smoking = smoking,
+  bodymeasure = bodymeasure
+)
+merged_data <- reduce(datasets, ~ inner_join(.x, .y, by = "SEQN"))
+head(merged_data)
+rm(list = setdiff(ls(), "merged_data"))
+```
+
+
+Variables filtering
+```{r}
+selected_data <- merged_data %>% select(SEQN, RIDAGEYR, RIAGENDR, RIDRETH1, LBXTC, URXUCM, LBXWBCSI, LBXLYPCT, LBXEOPCT, LBXRBCSI, LBXHGB, LBXPLTSI, LBDSATLC, ALQ121, DIQ010, HIQ011, MCQ080, MCQ220, SMQ020, BMXBMI, MCQ230A, MCQ230B, MCQ230C)
+head(selected_data)
+```
+
+Outcome variable creation
+```{r}
+selected_data <- selected_data %>%
+  mutate(outcome = if_else(MCQ230A == 16 | MCQ230B == 16 | MCQ230C == 16, 1, 0))
+selected_data$outcome[is.na(selected_data$outcome)] <- 0
+head(selected_data)
+```
+
+# Categorical variable convertion
+```{r}
+selected_data <- selected_data %>%
+  mutate(RIDRETH1 = factor(RIDRETH1, levels = c(1, 2, 3, 4, 5),
+                           labels = c("Mexican American", "Other Hispanic", "Non-Hispanic White", "Non-Hispanic Black", "Other Race - Including Multi-Racial")),
+         RIAGENDR = factor(RIAGENDR, levels = c(1, 2),
+                           labels = c("Male", "Female")),
+         ALQ121 = factor(ALQ121, levels = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 77, 99),
+                         labels = c("Never in the last year", "Every day", "Nearly every day", "3 to 4 times a week", "2 times a week", "Once a week", "2 to 3 times a month", "Once a month", "7 to 11 times in the last year", "3 to 6 times in the last year", "1 to 2 times in the last year", "Refused", "Don't know")),
+         DIQ010 = factor(DIQ010,
+                         levels = c(1, 2, 3, 7, 9),
+                         labels = c("Yes", 
+                                    "No", 
+                                    "Borderline", 
+                                    "Refused", 
+                                    "Don't know"))
+         ) %>% select(-MCQ230A, -MCQ230B, -MCQ230C)
+```
+
+
+Data cleaning
+```{r}
+colSums(is.na(selected_data))
+variables_to_impute <- c("LBXTC", "URXUCM", "LBXWBCSI", "LBXLYPCT", 
+                         "LBXEOPCT", "LBXRBCSI", "LBXHGB", "LBXPLTSI", 
+                         "LBDSATLC", "BMXBMI")
+selected_data[variables_to_impute] <- lapply(selected_data[variables_to_impute], function(x) {
+  ifelse(is.na(x), mean(x, na.rm = TRUE), x)
+})
+impute_mode <- function(x) {
+  mode_val <- names(sort(table(x), decreasing = TRUE))[1]  # Find mode
+  x[is.na(x)] <- mode_val
+  return(x)
+}
+selected_data <- selected_data %>%
+  mutate(across(c("ALQ121", "MCQ220"), impute_mode))
+
+colSums(is.na(selected_data))
+```
+
+# rose method
+```{r}
+library(ROSE)
+selected_data$outcome <- as.factor(selected_data$outcome)
+library(dplyr)
+selected_data <- selected_data %>%
+  mutate(across(where(is.character), as.factor))
+selected_data <- selected_data %>%
+  mutate(across(where(is.logical), as.numeric))
+selected_data$outcome <- as.factor(selected_data$outcome)
+balanced_data <- ROSE(outcome ~ ., data = selected_data, seed = 123)$data
+table(balanced_data$outcome)
+prop.table(table(balanced_data$outcome)) * 100
+```
+
+# Univariate analysis
+```{r}
+univariate_analysis <- function(data) {
+  library(dplyr)
+  results <- list()
+  for (col in colnames(data)) {
+    if (is.numeric(data[[col]])) {
+      stats <- data %>%
+        summarise(
+          Variable = col,
+          Mean = mean(.data[[col]], na.rm = TRUE),
+          Median = median(.data[[col]], na.rm = TRUE),
+          StdDev = sd(.data[[col]], na.rm = TRUE),
+          Min = min(.data[[col]], na.rm = TRUE),
+          Max = max(.data[[col]], na.rm = TRUE),
+          Missing = sum(is.na(.data[[col]]))
+        )
+    } else {
+      stats <- data %>%
+        group_by(.data[[col]]) %>%
+        summarise(Frequency = n(), .groups = "drop") %>%
+        mutate(Variable = col, Missing = sum(is.na(data[[col]])))
+    }
+    results[[col]] <- stats
+  }
+  
+  return(results)
+}
+univariate_analysis(balanced_data)
+```
+
+# Multicollinearity analysis
+```{r}
+numeric_data <- balanced_data %>% select(where(is.numeric))
+correlation_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+print(correlation_matrix)
+corrplot(correlation_matrix, method = "color", type = "lower",
+         tl.col = "black", tl.srt = 45, col = colorRampPalette(c("blue", "white", "red"))(200))
+```
+
