@@ -13,13 +13,14 @@ library(purrr)
 library(ggplot2)
 library(reshape2)
 library(corrplot)
+library(broom)
 ```
 
 
 
 Import data
 ```{r}
-setwd("G:/My Drive/2024 Fall/GU2686/Repository/Dataset")
+setwd("/Users/minyangmaxims_xu/Library/CloudStorage/GoogleDrive-mx2269@nyu.edu/My Drive/2024 Fall/GU2686/Repository/Dataset")
 # "G:/My Drive/2024 Fall/GU2686/Repository/Dataset"
 # "/Users/minyangmaxims_xu/Library/CloudStorage/GoogleDrive-mx2269@nyu.edu/My Drive/2024 Fall/GU2686/Repository/Dataset"
 demorgraphic <- read_xpt("Demorgraphic.XPT")
@@ -163,5 +164,76 @@ correlation_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
 print(correlation_matrix)
 corrplot(correlation_matrix, method = "color", type = "lower",
          tl.col = "black", tl.srt = 45, col = colorRampPalette(c("blue", "white", "red"))(200))
+```
+
+# Machine Learning Model Analysis
+
+## Logistic Regression
+```{r}
+logit_model <- glm(outcome ~ ., data = balanced_data, family = binomial)
+
+# Display model summary
+summary(logit_model)
+
+# Extract coefficients, p-values, and confidence intervals
+logit_results <- tidy(logit_model) %>%
+  mutate(
+    `95% CI Lower` = exp(confint(logit_model)[,1]),
+    `95% CI Upper` = exp(confint(logit_model)[,2]),
+    OR = exp(estimate)
+  ) %>%
+  select(term, OR, estimate, std.error, statistic, p.value, `95% CI Lower`, `95% CI Upper`)
+
+# Print formatted logistic regression results
+print(logit_results)
+```
+
+```{r}
+# Load necessary packages
+library(caret)   # For performance evaluation
+library(pROC)    # For ROC curve and AUC
+library(ggplot2) # For visualization
+
+# Predict probabilities on balanced_data
+pred_prob <- predict(logit_model, balanced_data, type = "response")
+
+# Convert probabilities to binary predictions (threshold = 0.5)
+pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+
+# Convert to factors for confusion matrix
+balanced_data$outcome <- as.factor(balanced_data$outcome)
+pred_class <- as.factor(pred_class)
+
+# Generate confusion matrix
+conf_matrix <- confusionMatrix(pred_class, balanced_data$outcome, positive = "1")
+print(conf_matrix)
+
+# Extract key metrics
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Sensitivity"]  # Sensitivity = Recall
+specificity <- conf_matrix$byClass["Specificity"]
+f1_score <- conf_matrix$byClass["F1"]
+
+# Print performance metrics
+cat("\nModel Performance Metrics:\n")
+cat("Accuracy:", round(accuracy, 4), "\n")
+cat("Precision:", round(precision, 4), "\n")
+cat("Recall (Sensitivity):", round(recall, 4), "\n")
+cat("Specificity:", round(specificity, 4), "\n")
+cat("F1 Score:", round(f1_score, 4), "\n")
+
+# Calculate and plot ROC curve
+roc_curve <- roc(balanced_data$outcome, pred_prob)
+auc_value <- auc(roc_curve)
+cat("AUC:", round(auc_value, 4), "\n")
+
+# Plot ROC Curve
+ggplot() +
+  geom_line(aes(x = roc_curve$specificities, y = roc_curve$sensitivities), color = "blue") +
+  geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curve", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
 ```
 
