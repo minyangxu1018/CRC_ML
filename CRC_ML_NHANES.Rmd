@@ -14,226 +14,471 @@ library(ggplot2)
 library(reshape2)
 library(corrplot)
 library(broom)
+library(caret)
+library(pROC)
+library(tibble)
 ```
 
 
 
-Import data
+Set Working Directory & Read Data
 ```{r}
 setwd("/Users/minyangmaxims_xu/Library/CloudStorage/GoogleDrive-mx2269@nyu.edu/My Drive/2024 Fall/GU2686/Repository/Dataset")
-# "G:/My Drive/2024 Fall/GU2686/Repository/Dataset"
-# "/Users/minyangmaxims_xu/Library/CloudStorage/GoogleDrive-mx2269@nyu.edu/My Drive/2024 Fall/GU2686/Repository/Dataset"
+
+# 读取数据（不再删除任何变量）
 demorgraphic <- read_xpt("Demorgraphic.XPT")
 totalcholoesterol <- read_xpt("Cholesterol - Total (P_TCHOL).XPT")
 chromiunurine <- read_xpt("Chromium Urine.XPT")
 completebloodcount <- read_xpt("Complete Blood Count with 5-Part Differential in Whole Blood (P_CBC).XPT")
-standardbiochemistry <- read_xpt("Standard Biochemistry Profile (P_BIOPRO).XPT")
-alcoholuse <- read_xpt("Alcohol Use (P_ALQ).XPT")
-diabetes <- read_xpt("Diabetes (P_DIQ).XPT")
-healthinsurance <- read_xpt("Health Insurance (P_HIQ).XPT")
 medicalcondition <- read_xpt("Medical Conditions (P_MCQ).XPT")
 smoking <- read_xpt("Smoking - Cigarette Use (P_SMQ).XPT")
 bodymeasure <- read_xpt("Body Measure (P_BMX).XPT")
 ```
 
-Combining data
+Merge Data by SEQN
 ```{r}
 datasets <- list(
   demorgraphic = demorgraphic,
   totalcholoesterol = totalcholoesterol,
   chromiunurine = chromiunurine,
   completebloodcount = completebloodcount,
-  standardbiochemistry = standardbiochemistry,
-  alcoholuse = alcoholuse,
-  diabetes = diabetes,
-  healthinsurance = healthinsurance,
   medicalcondition = medicalcondition,
   smoking = smoking,
   bodymeasure = bodymeasure
 )
 merged_data <- reduce(datasets, ~ inner_join(.x, .y, by = "SEQN"))
 head(merged_data)
+
+# 清除不必要的变量，仅保留合并后的数据
 rm(list = setdiff(ls(), "merged_data"))
 ```
 
 
-Variables filtering
+Select & Process Features
 ```{r}
-selected_data <- merged_data %>% select(SEQN, RIDAGEYR, RIAGENDR, RIDRETH1, LBXTC, URXUCM, LBXWBCSI, LBXLYPCT, LBXEOPCT, LBXRBCSI, LBXHGB, LBXPLTSI, LBDSATLC, ALQ121, DIQ010, HIQ011, MCQ080, MCQ220, SMQ020, BMXBMI, MCQ230A, MCQ230B, MCQ230C)
-head(selected_data)
-```
+# 📌 Select Variables for Analysis
+selected_data <- merged_data %>%
+  select(SEQN, RIDAGEYR, RIAGENDR, RIDRETH1, LBXTC, LBXWBCSI, LBXLYPCT, 
+         LBXEOPCT, LBXRBCSI, LBXHGB, LBXPLTSI, MCQ080, MCQ220, SMQ020, 
+         BMXBMI, MCQ230A, MCQ230B, MCQ230C)
 
-Outcome variable creation
-```{r}
+# 📌 Create Outcome Variable (Disease Status)
 selected_data <- selected_data %>%
   mutate(outcome = if_else(MCQ230A == 16 | MCQ230B == 16 | MCQ230C == 16, 1, 0))
+
+# 📌 Handle Missing Values in Outcome
 selected_data$outcome[is.na(selected_data$outcome)] <- 0
-head(selected_data)
-```
 
-# Categorical variable convertion
-```{r}
-selected_data <- selected_data %>%
-  mutate(RIDRETH1 = factor(RIDRETH1, levels = c(1, 2, 3, 4, 5),
-                           labels = c("Mexican American", "Other Hispanic", "Non-Hispanic White", "Non-Hispanic Black", "Other Race - Including Multi-Racial")),
-         RIAGENDR = factor(RIAGENDR, levels = c(1, 2),
-                           labels = c("Male", "Female")),
-         ALQ121 = factor(ALQ121, levels = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 77, 99),
-                         labels = c("Never in the last year", "Every day", "Nearly every day", "3 to 4 times a week", "2 times a week", "Once a week", "2 to 3 times a month", "Once a month", "7 to 11 times in the last year", "3 to 6 times in the last year", "1 to 2 times in the last year", "Refused", "Don't know")),
-         DIQ010 = factor(DIQ010,
-                         levels = c(1, 2, 3, 7, 9),
-                         labels = c("Yes", 
-                                    "No", 
-                                    "Borderline", 
-                                    "Refused", 
-                                    "Don't know"))
-         ) %>% select(-MCQ230A, -MCQ230B, -MCQ230C)
+# 📌 Remove Redundant Variables (Used in Outcome)
+selected_data <- selected_data %>% select(-MCQ230A, -MCQ230B, -MCQ230C)
+
 ```
 
 
-Data cleaning
+Data Balancing (Downsampling)
 ```{r}
-colSums(is.na(selected_data))
-variables_to_impute <- c("LBXTC", "URXUCM", "LBXWBCSI", "LBXLYPCT", 
-                         "LBXEOPCT", "LBXRBCSI", "LBXHGB", "LBXPLTSI", 
-                         "LBDSATLC", "BMXBMI")
-selected_data[variables_to_impute] <- lapply(selected_data[variables_to_impute], function(x) {
-  ifelse(is.na(x), mean(x, na.rm = TRUE), x)
-})
+# 📌 Split Data by Outcome
+outcome_0 <- selected_data %>% filter(outcome == 0)
+outcome_1 <- selected_data %>% filter(outcome == 1)
+
+# 📌 Downsample `outcome=0` to 1200 Samples
+set.seed(42)
+outcome_0_downsampled <- outcome_0 %>% slice_sample(n = 1200)
+
+# 📌 Combine Downsampled Data with `outcome=1`
+balanced_data <- bind_rows(outcome_0_downsampled, outcome_1) %>% sample_frac(1)
+
+# 📌 Check Outcome Distribution
+table(balanced_data$outcome)
+
+```
+
+
+
+Data Preprocessing
+```{r}
+# 📌 Remove `SEQN` Variable
+balanced_data <- balanced_data %>% select(-SEQN)
+
+# 📌 Impute Missing Values (Numerical: Mean, Categorical: Mode)
+balanced_data <- balanced_data %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
 impute_mode <- function(x) {
-  mode_val <- names(sort(table(x), decreasing = TRUE))[1]  # Find mode
+  mode_val <- names(sort(table(x), decreasing = TRUE))[1]
   x[is.na(x)] <- mode_val
   return(x)
 }
-selected_data <- selected_data %>%
-  mutate(across(c("ALQ121", "MCQ220"), impute_mode))
+balanced_data <- balanced_data %>%
+  mutate(across(where(is.factor), impute_mode))
 
-colSums(is.na(selected_data))
 ```
 
-# rose method
+
+
+
+Train-Test Split (80/20)
 ```{r}
-library(ROSE)
-selected_data$outcome <- as.factor(selected_data$outcome)
-library(dplyr)
-selected_data <- selected_data %>%
-  mutate(across(where(is.character), as.factor))
-selected_data <- selected_data %>%
-  mutate(across(where(is.logical), as.numeric))
-selected_data$outcome <- as.factor(selected_data$outcome)
-balanced_data <- ROSE(outcome ~ ., data = selected_data, seed = 123)$data
-table(balanced_data$outcome)
-prop.table(table(balanced_data$outcome)) * 100
+# 📌 Create Training & Testing Data (80/20 Split)
+set.seed(123)
+train_index <- createDataPartition(balanced_data$outcome, p = 0.8, list = FALSE)
+train_data <- balanced_data[train_index, ]
+test_data <- balanced_data[-train_index, ]
+
 ```
 
-# Univariate analysis
+
+
+Logistic Regression Model
 ```{r}
-univariate_analysis <- function(data) {
-  library(dplyr)
-  results <- list()
-  for (col in colnames(data)) {
-    if (is.numeric(data[[col]])) {
-      stats <- data %>%
-        summarise(
-          Variable = col,
-          Mean = mean(.data[[col]], na.rm = TRUE),
-          Median = median(.data[[col]], na.rm = TRUE),
-          StdDev = sd(.data[[col]], na.rm = TRUE),
-          Min = min(.data[[col]], na.rm = TRUE),
-          Max = max(.data[[col]], na.rm = TRUE),
-          Missing = sum(is.na(.data[[col]]))
-        )
-    } else {
-      stats <- data %>%
-        group_by(.data[[col]]) %>%
-        summarise(Frequency = n(), .groups = "drop") %>%
-        mutate(Variable = col, Missing = sum(is.na(data[[col]])))
-    }
-    results[[col]] <- stats
-  }
-  
-  return(results)
-}
-univariate_analysis(balanced_data)
-```
+# 📌 Train Logistic Regression Model
+logit_model <- glm(outcome ~ ., data = train_data, family = binomial)
 
-# Multicollinearity analysis
-```{r}
-numeric_data <- balanced_data %>% select(where(is.numeric))
-correlation_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
-print(correlation_matrix)
-corrplot(correlation_matrix, method = "color", type = "lower",
-         tl.col = "black", tl.srt = 45, col = colorRampPalette(c("blue", "white", "red"))(200))
-```
-
-# Machine Learning Model Analysis
-
-## Logistic Regression
-```{r}
-logit_model <- glm(outcome ~ ., data = balanced_data, family = binomial)
-
-# Display model summary
+# 📌 Model Summary
 summary(logit_model)
 
-# Extract coefficients, p-values, and confidence intervals
-logit_results <- tidy(logit_model) %>%
-  mutate(
-    `95% CI Lower` = exp(confint(logit_model)[,1]),
-    `95% CI Upper` = exp(confint(logit_model)[,2]),
-    OR = exp(estimate)
-  ) %>%
-  select(term, OR, estimate, std.error, statistic, p.value, `95% CI Lower`, `95% CI Upper`)
+# 📌 Predict on Test Data
+logit_prob <- predict(logit_model, test_data, type = "response")
 
-# Print formatted logistic regression results
-print(logit_results)
-```
+# 📌 Convert Probability to Binary Predictions
+logit_pred <- ifelse(logit_prob > 0.5, 1, 0)
+logit_pred <- factor(logit_pred, levels = c(0, 1))
+test_data$outcome <- factor(test_data$outcome, levels = c(0, 1))
 
-```{r}
-# Load necessary packages
-library(caret)   # For performance evaluation
-library(pROC)    # For ROC curve and AUC
-library(ggplot2) # For visualization
-
-# Predict probabilities on balanced_data
-pred_prob <- predict(logit_model, balanced_data, type = "response")
-
-# Convert probabilities to binary predictions (threshold = 0.5)
-pred_class <- ifelse(pred_prob > 0.5, 1, 0)
-
-# Convert to factors for confusion matrix
-balanced_data$outcome <- as.factor(balanced_data$outcome)
-pred_class <- as.factor(pred_class)
-
-# Generate confusion matrix
-conf_matrix <- confusionMatrix(pred_class, balanced_data$outcome, positive = "1")
+# 📌 Compute Confusion Matrix
+conf_matrix <- confusionMatrix(logit_pred, test_data$outcome, positive = "1")
 print(conf_matrix)
 
-# Extract key metrics
+# 📌 Performance Metrics
 accuracy <- conf_matrix$overall["Accuracy"]
 precision <- conf_matrix$byClass["Precision"]
-recall <- conf_matrix$byClass["Sensitivity"]  # Sensitivity = Recall
+recall <- conf_matrix$byClass["Sensitivity"]
 specificity <- conf_matrix$byClass["Specificity"]
 f1_score <- conf_matrix$byClass["F1"]
 
-# Print performance metrics
-cat("\nModel Performance Metrics:\n")
-cat("Accuracy:", round(accuracy, 4), "\n")
-cat("Precision:", round(precision, 4), "\n")
-cat("Recall (Sensitivity):", round(recall, 4), "\n")
-cat("Specificity:", round(specificity, 4), "\n")
-cat("F1 Score:", round(f1_score, 4), "\n")
+cat("\n📌 **Logistic Regression Performance Metrics**:\n")
+cat("✅ Accuracy:", round(accuracy, 4), "\n")
+cat("✅ Precision:", round(precision, 4), "\n")
+cat("✅ Recall:", round(recall, 4), "\n")
+cat("✅ Specificity:", round(specificity, 4), "\n")
+cat("✅ F1 Score:", round(f1_score, 4), "\n")
 
-# Calculate and plot ROC curve
-roc_curve <- roc(balanced_data$outcome, pred_prob)
+# 📌 Compute AUC
+roc_curve <- roc(test_data$outcome, logit_prob)
 auc_value <- auc(roc_curve)
-cat("AUC:", round(auc_value, 4), "\n")
+cat("✅ AUC:", round(auc_value, 4), "\n")
 
-# Plot ROC Curve
+# 📌 Plot ROC Curve
 ggplot() +
   geom_line(aes(x = roc_curve$specificities, y = roc_curve$sensitivities), color = "blue") +
   geom_abline(linetype = "dashed") +
-  labs(title = "ROC Curve", x = "1 - Specificity", y = "Sensitivity") +
+  labs(title = "ROC Curve - Logistic Regression", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+
+
+
+# 📌 Extract Feature Importance (Absolute Coefficients)
+feature_importance <- broom::tidy(logit_model) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_coef = abs(estimate)) %>%
+  arrange(desc(abs_coef))
+
+# 📌 Display Top Features
+print(feature_importance)
+
+# 📌 Plot Feature Importance
+ggplot(feature_importance, aes(x = reorder(term, abs_coef), y = abs_coef)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance - Logistic Regression",
+       x = "Feature",
+       y = "Absolute Coefficient Value") +
   theme_minimal()
 
 ```
+
+
+
+
+
+Random Forest
+```{r}
+library(caret)       # 数据预处理 & 评估
+library(randomForest) # Random Forest
+library(pROC)        # ROC 曲线 & AUC
+library(ggplot2)     # 可视化
+
+# ❶ **转换 `outcome` 为因子**
+balanced_data$outcome <- as.factor(balanced_data$outcome)
+
+# ❷ **拆分 `Train/Test` 数据集 (80/20)**
+set.seed(123)
+train_index <- createDataPartition(balanced_data$outcome, p = 0.8, list = FALSE)
+train_data <- balanced_data[train_index, ]
+test_data <- balanced_data[-train_index, ]
+
+# ❸ **训练 `Logistic Regression`**
+logit_model <- glm(outcome ~ ., data = train_data, family = binomial)
+summary(logit_model)
+
+# ❹ **预测 `Test` 数据**
+logit_prob <- predict(logit_model, test_data, type = "response")
+logit_pred <- factor(ifelse(logit_prob > 0.5, 1, 0), levels = c(0, 1))
+
+# ❺ **计算混淆矩阵**
+conf_matrix_logit <- confusionMatrix(logit_pred, test_data$outcome, positive = "1")
+print(conf_matrix_logit)
+
+# ❻ **计算 `ROC Curve` 和 `AUC`**
+roc_curve_logit <- roc(test_data$outcome, logit_prob)
+auc_logit <- auc(roc_curve_logit)
+cat("✅ Logistic Regression AUC:", round(auc_logit, 4), "\n")
+
+# ❼ **绘制 `ROC Curve`**
+ggplot() +
+  geom_line(aes(x = roc_curve_logit$specificities, y = roc_curve_logit$sensitivities), color = "blue") +
+  geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curve - Logistic Regression", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+# ❽ **训练 `Random Forest`**
+set.seed(123)
+rf_model <- randomForest(outcome ~ ., data = train_data, ntree = 500, mtry = sqrt(ncol(train_data) - 1), importance = TRUE)
+
+# ❾ **预测 `Test` 数据**
+rf_pred <- predict(rf_model, test_data)
+
+# 🔟 **确保因子一致**
+rf_pred <- factor(rf_pred, levels = levels(test_data$outcome))
+
+# ⓫ **计算混淆矩阵**
+conf_matrix_rf <- confusionMatrix(rf_pred, test_data$outcome, positive = "1")
+print(conf_matrix_rf)
+
+# ⓬ **计算 `ROC Curve` 和 `AUC`**
+rf_prob <- predict(rf_model, test_data, type = "prob")[,2]
+roc_curve_rf <- roc(test_data$outcome, rf_prob)
+auc_rf <- auc(roc_curve_rf)
+cat("✅ Random Forest AUC:", round(auc_rf, 4), "\n")
+
+# ⓭ **绘制 `ROC Curve`**
+ggplot() +
+  geom_line(aes(x = roc_curve_rf$specificities, y = roc_curve_rf$sensitivities), color = "red") +
+  geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curve - Random Forest", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+# ⓮ **绘制 `Feature Importance`**
+importance_df <- as.data.frame(importance(rf_model)) %>%
+  rownames_to_column(var = "Feature") %>%
+  arrange(desc(MeanDecreaseGini))
+
+ggplot(importance_df, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance - Random Forest", x = "Feature", y = "Importance (MeanDecreaseGini)") +
+  theme_minimal()
+```
+
+
+
+
+XGBoost
+```{r}
+library(caret)     # 数据预处理 & 评估
+library(xgboost)   # XGBoost
+library(pROC)      # 计算 AUC & 画 ROC 曲线
+library(ggplot2)   # 可视化
+
+# ❶ **确保 `outcome` 是 `factor`**
+balanced_data$outcome <- as.factor(balanced_data$outcome)
+
+# ❷ **拆分 `Train/Test` 数据集 (80/20)**
+set.seed(123)
+train_index <- createDataPartition(balanced_data$outcome, p = 0.8, list = FALSE)
+train_data <- balanced_data[train_index, ]
+test_data <- balanced_data[-train_index, ]
+
+# ❸ **转换数据格式 (XGBoost 需要数值型矩阵)**
+train_x <- as.matrix(train_data[, -which(names(train_data) == "outcome")])
+train_y <- as.numeric(as.character(train_data$outcome))
+
+test_x <- as.matrix(test_data[, -which(names(test_data) == "outcome")])
+test_y <- as.numeric(as.character(test_data$outcome))
+
+# ❹ **创建 `XGBoost` 训练数据**
+dtrain <- xgb.DMatrix(data = train_x, label = train_y)
+dtest <- xgb.DMatrix(data = test_x, label = test_y)
+
+# ❺ **设定 `XGBoost` 参数**
+xgb_params <- list(
+  objective = "binary:logistic",  # 目标: 二分类
+  eval_metric = "auc",            # 评估指标: AUC
+  max_depth = 2,                   # ⚠️ 让树变浅（默认 6）➡️ 降低学习能力
+  eta = 0.5,                        # ⚠️ 让学习率变大，更新幅度过快，容易跳过最优解
+  nthread = 2,                      # 线程数
+  subsample = 0.5,                  # ⚠️ 让训练数据采样更少，丢失信息（默认 0.8）
+  colsample_bytree = 0.5            # ⚠️ 让每棵树用更少特征（默认 0.8）
+)
+
+
+# ❻ **训练 `XGBoost` 模型**
+set.seed(123)
+xgb_model <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 60,      # 训练 200 轮
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 10,  # 如果 AUC 10 轮不提升，提前停止
+  verbose = 1
+)
+
+# ❼ **预测 `Test` 数据**
+xgb_prob <- predict(xgb_model, dtest)
+
+# ❽ **转换概率为二分类预测**
+xgb_pred <- ifelse(xgb_prob > 0.5, 1, 0)
+xgb_pred <- factor(xgb_pred, levels = c(0, 1))
+test_data$outcome <- factor(test_data$outcome, levels = c(0, 1))
+
+# ❾ **计算混淆矩阵**
+conf_matrix_xgb <- confusionMatrix(xgb_pred, test_data$outcome, positive = "1")
+print(conf_matrix_xgb)
+
+# 🔟 **提取模型评估指标**
+accuracy_xgb <- conf_matrix_xgb$overall["Accuracy"]
+precision_xgb <- conf_matrix_xgb$byClass["Precision"]
+recall_xgb <- conf_matrix_xgb$byClass["Sensitivity"]
+specificity_xgb <- conf_matrix_xgb$byClass["Specificity"]
+f1_score_xgb <- conf_matrix_xgb$byClass["F1"]
+
+cat("\n📌 **XGBoost Performance Metrics**:\n")
+cat("✅ Accuracy:", round(accuracy_xgb, 4), "\n")
+cat("✅ Precision:", round(precision_xgb, 4), "\n")
+cat("✅ Recall (Sensitivity):", round(recall_xgb, 4), "\n")
+cat("✅ Specificity:", round(specificity_xgb, 4), "\n")
+cat("✅ F1 Score:", round(f1_score_xgb, 4), "\n")
+
+# 🔟 **计算 `ROC Curve` 和 `AUC`**
+roc_curve_xgb <- roc(test_data$outcome, xgb_prob)
+auc_xgb <- auc(roc_curve_xgb)
+cat("✅ AUC:", round(auc_xgb, 4), "\n")
+
+# 🔟 **绘制 `ROC Curve`**
+ggplot() +
+  geom_line(aes(x = roc_curve_xgb$specificities, y = roc_curve_xgb$sensitivities), color = "green") +
+  geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curve - XGBoost", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+
+
+
+
+
+# 📌 Extract Feature Importance
+importance_matrix <- xgb.importance(feature_names = colnames(train_x), model = xgb_model)
+
+# 📌 Display Top Features
+print(importance_matrix)
+
+# 📌 Plot Feature Importance
+ggplot(importance_matrix, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  coord_flip() +
+  labs(title = "Feature Importance - XGBoost",
+       x = "Feature",
+       y = "Importance (Gain)") +
+  theme_minimal()
+
+```
+
+
+
+
+
+LASSO
+```{r}
+# 📌 加载必要的库
+library(glmnet)   # LASSO (L1 正则化回归)
+library(caret)    # 数据处理 & 评估
+library(pROC)     # AUC 计算
+library(ggplot2)  # 可视化
+
+# ❶ **确保 `outcome` 是因子**
+balanced_data$outcome <- as.factor(balanced_data$outcome)
+
+# ❷ **拆分 `Train/Test` 数据集 (80/20)**
+set.seed(123)
+train_index <- createDataPartition(balanced_data$outcome, p = 0.8, list = FALSE)
+train_data <- balanced_data[train_index, ]
+test_data <- balanced_data[-train_index, ]
+
+# ❸ **转换数据格式（LASSO 需要数值矩阵）**
+train_x <- as.matrix(train_data[, -which(names(train_data) == "outcome")])
+train_y <- as.numeric(as.character(train_data$outcome))
+
+test_x <- as.matrix(test_data[, -which(names(test_data) == "outcome")])
+test_y <- as.numeric(as.character(test_data$outcome))
+
+# ❹ **使用交叉验证寻找最佳 λ（正则化强度）**
+set.seed(123)
+cv_lasso <- cv.glmnet(train_x, train_y, alpha = 1, family = "binomial", nfolds = 10)
+best_lambda <- cv_lasso$lambda.min
+cat("✅ Best Lambda (Regularization Strength):", round(best_lambda, 6), "\n")
+
+# ❺ **训练最终的 LASSO Logistic Regression 模型**
+lasso_model <- glmnet(train_x, train_y, alpha = 1, family = "binomial", lambda = best_lambda)
+
+# ❻ **预测 `Test` 数据**
+lasso_prob <- predict(lasso_model, newx = test_x, type = "response")
+
+# ❼ **转换概率为二分类预测**
+lasso_pred <- ifelse(lasso_prob > 0.5, 1, 0)
+lasso_pred <- factor(lasso_pred, levels = c(0, 1))
+test_data$outcome <- factor(test_data$outcome, levels = c(0, 1))
+
+# ❽ **计算混淆矩阵**
+conf_matrix_lasso <- confusionMatrix(lasso_pred, test_data$outcome, positive = "1")
+print(conf_matrix_lasso)
+
+# ❾ **提取模型评估指标**
+accuracy_lasso <- conf_matrix_lasso$overall["Accuracy"]
+precision_lasso <- conf_matrix_lasso$byClass["Precision"]
+recall_lasso <- conf_matrix_lasso$byClass["Sensitivity"]
+specificity_lasso <- conf_matrix_lasso$byClass["Specificity"]
+f1_score_lasso <- conf_matrix_lasso$byClass["F1"]
+
+cat("\n📌 **LASSO Logistic Regression Performance Metrics**:\n")
+cat("✅ Accuracy:", round(accuracy_lasso, 4), "\n")
+cat("✅ Precision:", round(precision_lasso, 4), "\n")
+cat("✅ Recall (Sensitivity):", round(recall_lasso, 4), "\n")
+cat("✅ Specificity:", round(specificity_lasso, 4), "\n")
+cat("✅ F1 Score:", round(f1_score_lasso, 4), "\n")
+
+# 🔟 **计算 `ROC Curve` 和 `AUC`**
+roc_curve_lasso <- roc(test_data$outcome, lasso_prob)
+auc_lasso <- auc(roc_curve_lasso)
+cat("✅ AUC:", round(auc_lasso, 4), "\n")
+
+# 🔟 **绘制 `ROC Curve`**
+ggplot() +
+  geom_line(aes(x = roc_curve_lasso$specificities, y = roc_curve_lasso$sensitivities), color = "purple") +
+  geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curve - LASSO Logistic Regression", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+
+
+
+
+
 
